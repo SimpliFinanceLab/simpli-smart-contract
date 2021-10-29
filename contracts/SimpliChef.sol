@@ -1399,12 +1399,12 @@ interface IStrategy {
     // Main want token compounding function
     function earn() external;
 
-    // Transfer want tokens autoFarm -> strategy
+    // Transfer want tokens Simpli -> strategy
     function deposit(address _userAddress, uint256 _wantAmt)
         external
         returns (uint256);
 
-    // Transfer want tokens strategy -> autoFarm
+    // Transfer want tokens strategy -> Simpli
     function withdraw(address _userAddress, uint256 _wantAmt)
         external
         returns (uint256);
