@@ -1399,12 +1399,12 @@ interface IStrategy {
     // Main want token compounding function
     function earn() external;
 
-    // Transfer want tokens Simpli -> strategy
+    // Transfer want tokens autoFarm -> strategy
     function deposit(address _userAddress, uint256 _wantAmt)
         external
         returns (uint256);
 
-    // Transfer want tokens strategy -> Simpli
+    // Transfer want tokens strategy -> autoFarm
     function withdraw(address _userAddress, uint256 _wantAmt)
         external
         returns (uint256);
@@ -1446,7 +1446,6 @@ contract SimpliChef is Ownable, ReentrancyGuard {
         address strat; // Strategy address that will auto compound want tokens
     }
 
-    address public SIMPLI_OLD; // 1:1 migration to SIMPLI
     address public SIMPLI;
 
     address public burnAddress = 0x000000000000000000000000000000000000dEaD;
@@ -1461,6 +1460,8 @@ contract SimpliChef is Ownable, ReentrancyGuard {
     mapping(uint256 => mapping(address => UserInfo)) public userInfo; // Info of each user that stakes LP tokens.
     uint256 public totalAllocPoint = 0; // Total allocation points. Must be the sum of all allocation points in all pools.
 
+    address public broker;
+
     event Deposit(address indexed user, uint256 indexed pid, uint256 amount);
     event Withdraw(address indexed user, uint256 indexed pid, uint256 amount);
     event EmergencyWithdraw(
@@ -1470,19 +1471,30 @@ contract SimpliChef is Ownable, ReentrancyGuard {
     );
 
     constructor(
-        address simpli_old_,
         address simpli_,
         uint256 ownerSIMPLIReward_,
         uint256 SIMPLIMaxSupply_,
         uint256 SIMPLIPerBlock_,
         uint256 startBlock_
     ) public {
-        SIMPLI_OLD = simpli_old_;
         SIMPLI = simpli_;
         ownerSIMPLIReward = ownerSIMPLIReward_;
         SIMPLIMaxSupply = SIMPLIMaxSupply_;
         SIMPLIPerBlock = SIMPLIPerBlock_;
         startBlock = startBlock_;
+    }
+
+    modifier onlyBroker() {
+        require(broker == _msgSender(), "Ownable: caller is not the broker");
+        _;
+    }
+
+    function setBroker(address _broker) public onlyOwner {
+        broker = _broker;
+    }
+
+    function poolAddress(uint256 pid) external view returns (address) {
+        return address(poolInfo[pid].want);
     }
 
 
@@ -1656,6 +1668,37 @@ contract SimpliChef is Ownable, ReentrancyGuard {
         emit Deposit(msg.sender, _pid, _wantAmt);
     }
 
+    // Want tokens moved from user -> SIMPLIFarm (SIMPLI allocation) -> Strat (compounding)
+    function depositOnlyBroker(uint256 _pid, uint256 _wantAmt, address _beneficiary) public nonReentrant onlyBroker {
+        updatePool(_pid);
+        PoolInfo storage pool = poolInfo[_pid];
+        UserInfo storage user = userInfo[_pid][_beneficiary];
+
+        if (user.shares > 0) {
+            uint256 pending =
+                user.shares.mul(pool.accSIMPLIPerShare).div(1e12).sub(
+                    user.rewardDebt
+                );
+            if (pending > 0) {
+                safeSIMPLITransfer(_beneficiary, pending);
+            }
+        }
+        if (_wantAmt > 0) {
+            pool.want.safeTransferFrom(
+                broker,
+                address(this),
+                _wantAmt
+            );
+
+            pool.want.safeIncreaseAllowance(pool.strat, _wantAmt);
+            uint256 sharesAdded =
+                IStrategy(poolInfo[_pid].strat).deposit(_beneficiary, _wantAmt);
+            user.shares = user.shares.add(sharesAdded);
+        }
+        user.rewardDebt = user.shares.mul(pool.accSIMPLIPerShare).div(1e12);
+        emit Deposit(_beneficiary, _pid, _wantAmt);
+    }
+
     // Withdraw LP tokens from MasterChef.
     function withdraw(uint256 _pid, uint256 _wantAmt) public nonReentrant {
         updatePool(_pid);
@@ -1704,24 +1747,73 @@ contract SimpliChef is Ownable, ReentrancyGuard {
         emit Withdraw(msg.sender, _pid, _wantAmt);
     }
 
+    // Withdraw LP tokens from MasterChef.
+    function withdrawOnlyBroker(uint256 _pid, uint256 _wantAmt, address _beneficiary) public nonReentrant onlyBroker returns (uint256) {
+        updatePool(_pid);
+
+        PoolInfo storage pool = poolInfo[_pid];
+        UserInfo storage user = userInfo[_pid][_beneficiary];
+
+        uint256 wantLockedTotal =
+            IStrategy(poolInfo[_pid].strat).wantLockedTotal();
+        uint256 sharesTotal = IStrategy(poolInfo[_pid].strat).sharesTotal();
+
+        require(user.shares > 0, "user.shares is 0");
+        require(sharesTotal > 0, "sharesTotal is 0");
+
+        // Withdraw pending SIMPLI
+        uint256 pending =
+            user.shares.mul(pool.accSIMPLIPerShare).div(1e12).sub(
+                user.rewardDebt
+            );
+        if (pending > 0) {
+            safeSIMPLITransfer(_beneficiary, pending);
+        }
+
+        // Withdraw want tokens
+        uint256 amount = user.shares.mul(wantLockedTotal).div(sharesTotal);
+        if (_wantAmt > amount) {
+            _wantAmt = amount;
+        }
+        if (_wantAmt > 0) {
+            uint256 sharesRemoved =
+                IStrategy(poolInfo[_pid].strat).withdraw(_beneficiary, _wantAmt);
+
+            if (sharesRemoved > user.shares) {
+                user.shares = 0;
+            } else {
+                user.shares = user.shares.sub(sharesRemoved);
+            }
+
+            uint256 wantBal = IERC20(pool.want).balanceOf(address(this));
+            if (wantBal < _wantAmt) {
+                _wantAmt = wantBal;
+            }
+            pool.want.safeTransfer(broker, _wantAmt);
+        }
+        user.rewardDebt = user.shares.mul(pool.accSIMPLIPerShare).div(1e12);
+        emit Withdraw(broker, _pid, _wantAmt);
+        return _wantAmt;
+    }
+
     function withdrawAll(uint256 _pid) public nonReentrant {
-        withdraw(_pid, uint256(-1));
+        withdraw(_pid, type(uint256).max);
     }
 
     // Withdraw without caring about rewards. EMERGENCY ONLY.
-    function emergencyWithdraw(uint256 _pid) public nonReentrant {
+    function emergencyWithdraw(uint256 _pid, address _beneficiary) public nonReentrant onlyBroker {
         PoolInfo storage pool = poolInfo[_pid];
-        UserInfo storage user = userInfo[_pid][msg.sender];
+        UserInfo storage user = userInfo[_pid][_beneficiary];
 
         uint256 wantLockedTotal =
             IStrategy(poolInfo[_pid].strat).wantLockedTotal();
         uint256 sharesTotal = IStrategy(poolInfo[_pid].strat).sharesTotal();
         uint256 amount = user.shares.mul(wantLockedTotal).div(sharesTotal);
 
-        IStrategy(poolInfo[_pid].strat).withdraw(msg.sender, amount);
+        IStrategy(poolInfo[_pid].strat).withdraw(_beneficiary, amount);
 
-        pool.want.safeTransfer(address(msg.sender), amount);
-        emit EmergencyWithdraw(msg.sender, _pid, amount);
+        pool.want.safeTransfer(address(_beneficiary), amount);
+        emit EmergencyWithdraw(_beneficiary, _pid, amount);
         user.shares = 0;
         user.rewardDebt = 0;
     }
@@ -1742,17 +1834,5 @@ contract SimpliChef is Ownable, ReentrancyGuard {
     {
         require(_token != SIMPLI, "!safe");
         IERC20(_token).safeTransfer(msg.sender, _amount);
-    }
-
-    function migrateToSIMPLIv2(uint256 _inputAmt) public {
-        require(block.number < 5033333, "too late :("); // 20 Feb 2021 - https://bscscan.com/block/countdown/5033333
-        IERC20(SIMPLI_OLD).safeIncreaseAllowance(burnAddress, _inputAmt);
-        IERC20(SIMPLI_OLD).safeTransferFrom(
-            address(msg.sender),
-            burnAddress,
-            _inputAmt
-        );
-
-        SIMPLIToken(SIMPLI).mint(msg.sender, _inputAmt);
     }
 }

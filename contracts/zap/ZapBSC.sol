@@ -1,27 +1,47 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.6.12;
+pragma solidity ^0.8.0;
 
-import "../math/SafeMath.sol";
-import "../token/SafeBEP20.sol";
-import "../utils/OwnableUpgradeable.sol";
-import "../interfaces/IPancakePair.sol";
-import "../interfaces/IPancakeRouter02.sol";
-import "../interfaces/IZap.sol";
-import "../interfaces/ISafeSwapBNB.sol";
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+
+import "./token/SafeBEP20.sol";
+import "./interfaces/IPancakePair.sol";
+import "./interfaces/IPancakeRouter02.sol";
+import "./interfaces/IZap.sol";
+import "./interfaces/ISafeSwapBNB.sol";
 
 contract ZapBSC is IZap, OwnableUpgradeable {
-    using SafeMath for uint;
+    using SafeMath for uint256;
     using SafeBEP20 for IBEP20;
 
     /* ========== CONSTANT VARIABLES ========== */
 
-    address private constant CAKE = 0x1A78Af71E79A2183442dD9cb309580F425Cad962;
-    address private constant WBNB = 0x6945bA4c180e431334291e48C858C82c5B7B6387;
-    address private constant BUSD = 0xA4748C70A88D8a10A6B29c35AD116d0ad91Ee0Ab;
-    address private constant USDT = 0x240Aff20c537169eecC3Dca741819Ac583837Ef3;
+    struct TradeInfoETH {
+        address token;
+        uint256 amountTokenDesired;
+        uint256 amountTokenMin;
+        uint256 amountETHMin;
+        address to;
+        uint256 deadline;
+    }
 
+    struct TradeInfoTokens {
+        address tokenA;
+        address tokenB;
+        uint256 amountADesired;
+        uint256 amountBDesired;
+        uint256 amountAMin;
+        uint256 amountBMin;
+        address to;
+        uint256 deadline;
+    }
 
-    IPancakeRouter02 private constant ROUTER = IPancakeRouter02(0x8149f34D760f3683547b701DcEc4255fed847AD3);
+    address private constant WBNB = 0xae13d989daC2f0dEbFf460aC112a837C89BAa7cd; // testnet
+    address private constant CAKE = 0xf4caf41aF08E8CDB6C6Cf12EC7016B1B7A0837B0;
+    address private constant USDC = 0x962285FF57D4fe69cCC16dA9C8f968d5ffEdEDC5;
+    address private constant CHESS = 0x97b101A18ecd38B4E48f52A3264D25f9994dd604;
+
+    IPancakeRouter02 private constant ROUTER = IPancakeRouter02(0xD99D1c33F9fC3444f8101754aBC46c52416550D1);
 
     /* ========== STATE VARIABLES ========== */
 
@@ -36,18 +56,11 @@ contract ZapBSC is IZap, OwnableUpgradeable {
         __Ownable_init();
         require(owner() != address(0), "Zap: owner must be set");
 
-        setNotFlip(CAKE);
         setNotFlip(WBNB);
-        setNotFlip(BUSD);
-        setNotFlip(USDT);
+        setNotFlip(CAKE);
+        setNotFlip(USDC);
+        setNotFlip(CHESS);
 
-        /*
-        CASE 1: WBNB -> USDT/BUSD -> LP
-        CASE 2: USDT -> USDT/BUSD -> LP
-        CASE 3: USDT -> CAKE
-        CASE 4: USDT -> CAKE/USDT
-        */
-        setRoutePairAddress(USDT, BUSD);
     }
 
     receive() external payable {}
@@ -65,7 +78,7 @@ contract ZapBSC is IZap, OwnableUpgradeable {
 
     /* ========== External Functions ========== */
 
-    function zapInToken(address _from, uint amount, address _to) external override {
+    function zapInToken(address _from, uint256 amount, address _to) public override returns (uint256, uint256, uint256) {
         IBEP20(_from).safeTransferFrom(msg.sender, address(this), amount);
         _approveTokenIfNeeded(_from);
 
@@ -77,23 +90,52 @@ contract ZapBSC is IZap, OwnableUpgradeable {
                 // swap half amount for other
                 address other = _from == token0 ? token1 : token0;
                 _approveTokenIfNeeded(other);
-                uint sellAmount = amount.div(2);
-                uint otherAmount = _swap(_from, sellAmount, other, address(this));
-                ROUTER.addLiquidity(_from, other, amount.sub(sellAmount), otherAmount, 0, 0, msg.sender, block.timestamp);
+                uint256 sellAmount = amount.div(2);
+                uint256 otherAmount = _swap(_from, sellAmount, other, address(this));
+                TradeInfoTokens memory tradeInfo;
+                tradeInfo = TradeInfoTokens(
+                    _from, other, amount.sub(sellAmount), otherAmount, 0, 0, msg.sender, block.timestamp);
+                return ROUTER.addLiquidity(
+                    tradeInfo.tokenA,
+                    tradeInfo.tokenB,
+                    tradeInfo.amountADesired,
+                    tradeInfo.amountBDesired,
+                    tradeInfo.amountAMin,
+                    tradeInfo.amountBMin,
+                    tradeInfo.to,
+                    tradeInfo.deadline
+                );
             } else {
-                uint bnbAmount = _from == WBNB ? _safeSwapToBNB(amount) : _swapTokenForBNB(_from, amount, address(this));
-                _swapBNBToFlip(_to, bnbAmount, msg.sender);
+                uint256 bnbAmount = _from == WBNB ? _safeSwapToBNB(amount) : _swapTokenForBNB(_from, amount, address(this));
+                return _swapBNBToFlip(_to, bnbAmount, msg.sender);
             }
         } else {
-            _swap(_from, amount, _to, msg.sender);
+            uint256 swappedAmount = _swap(_from, amount, _to, msg.sender);
+            return (0, 0, swappedAmount);
         }
     }
 
-    function zapIn(address _to) external payable override {
-        _swapBNBToFlip(_to, msg.value, msg.sender);
+    function batchZapInToken(address _from, uint256[] memory _amounts, address[] memory _to) external {
+        require(_amounts.length == _to.length, "Amounts and addresses don't match");
+        for (uint256 i=0; i < _amounts.length; i++) {
+            _approveTokenIfNeeded(_from);
+            zapInToken(_from, _amounts[i], _to[i]);
+        }
     }
 
-    function zapOut(address _from, uint amount) external override {
+    function zapIn(address _to) external payable override returns (uint256, uint256, uint256) {
+        return _swapBNBToFlip(_to, msg.value, msg.sender);
+    }
+
+    function batchZapInBNB(uint256[] memory _amounts, address[] memory _to) external payable {
+        require(_amounts.length == _to.length, "Amounts and addresses don't match");
+
+        for (uint256 i=0; i < _amounts.length; i++) {
+            _swapBNBToFlip(_to[i], _amounts[i], msg.sender);
+        }
+    }
+
+    function zapOut(address _from, uint256 amount) external override {
         IBEP20(_from).safeTransferFrom(msg.sender, address(this), amount);
         _approveTokenIfNeeded(_from);
 
@@ -111,15 +153,46 @@ contract ZapBSC is IZap, OwnableUpgradeable {
         }
     }
 
+    function _swapTokenIfNotSame(address _from, uint256 _amount, address _to, address _receiver) private returns (uint256 receivedAmount) {
+        if (_from != _to) {
+            return _swap(_from, _amount, _to, _receiver);
+        } else {
+            IBEP20(_from).transfer(_receiver, _amount);
+            return _amount;
+        }
+    }
+
+
+    function zapOutToToken(address _from, uint256 amount, address _to) external override returns (uint256) {
+        IBEP20(_from).safeTransferFrom(msg.sender, address(this), amount);
+        _approveTokenIfNeeded(_from);
+
+        if (!isFlip(_from)) {
+            return _swapTokenForBNB(_from, amount, msg.sender);
+        } else {
+            IPancakePair pair = IPancakePair(_from);
+            address token0 = pair.token0();
+            address token1 = pair.token1();
+            _approveTokenIfNeeded(token0);
+            _approveTokenIfNeeded(token1);
+            (uint256 amount0, uint256 amount1) = ROUTER.removeLiquidity(token0, token1, amount, 0, 0, address(this), block.timestamp);
+            return _swapTokenIfNotSame(token0, amount0, _to, msg.sender) + _swapTokenIfNotSame(token1, amount1, _to, msg.sender);
+        }
+    }
+
     /* ========== Private Functions ========== */
 
     function _approveTokenIfNeeded(address token) private {
         if (IBEP20(token).allowance(address(this), address(ROUTER)) == 0) {
-            IBEP20(token).safeApprove(address(ROUTER), uint(- 1));
+            IBEP20(token).safeApprove(address(ROUTER), type(uint256).max);
         }
     }
 
-    function _swapBNBToFlip(address flip, uint amount, address receiver) private {
+    function _swapBNBToFlip(
+        address flip,
+        uint256 amount,
+        address receiver
+    ) private returns (uint256 output0, uint256 output1, uint256 outputLP) {
         if (!isFlip(flip)) {
             _swapBNBForToken(flip, amount, receiver);
         } else {
@@ -129,24 +202,46 @@ contract ZapBSC is IZap, OwnableUpgradeable {
             address token1 = pair.token1();
             if (token0 == WBNB || token1 == WBNB) {
                 address token = token0 == WBNB ? token1 : token0;
-                uint swapValue = amount.div(2);
-                uint tokenAmount = _swapBNBForToken(token, swapValue, address(this));
+                uint256 swapValue = amount.div(2);
+                uint256 tokenAmount = _swapBNBForToken(token, swapValue, address(this));
 
                 _approveTokenIfNeeded(token);
-                ROUTER.addLiquidityETH{value : amount.sub(swapValue)}(token, tokenAmount, 0, 0, receiver, block.timestamp);
+                TradeInfoETH memory tradeInfo;
+                tradeInfo = TradeInfoETH(
+                    token, tokenAmount, 0, 0, receiver, block.timestamp);
+                return ROUTER.addLiquidityETH{value : amount.sub(swapValue)}(
+                    tradeInfo.token,
+                    tradeInfo.amountTokenDesired,
+                    tradeInfo.amountTokenMin,
+                    tradeInfo.amountETHMin,
+                    tradeInfo.to,
+                    tradeInfo.deadline
+                );
             } else {
-                uint swapValue = amount.div(2);
-                uint token0Amount = _swapBNBForToken(token0, swapValue, address(this));
-                uint token1Amount = _swapBNBForToken(token1, amount.sub(swapValue), address(this));
+                uint256 swapValue = amount.div(2);
+                uint256 token0Amount = _swapBNBForToken(token0, swapValue, address(this));
+                uint256 token1Amount = _swapBNBForToken(token1, amount.sub(swapValue), address(this));
 
                 _approveTokenIfNeeded(token0);
                 _approveTokenIfNeeded(token1);
-                ROUTER.addLiquidity(token0, token1, token0Amount, token1Amount, 0, 0, receiver, block.timestamp);
+                TradeInfoTokens memory tradeInfo;
+                tradeInfo = TradeInfoTokens(
+                    token0, token1, token0Amount, token1Amount, 0, 0, receiver, block.timestamp);
+                return ROUTER.addLiquidity(
+                    tradeInfo.tokenA,
+                    tradeInfo.tokenB,
+                    tradeInfo.amountADesired,
+                    tradeInfo.amountBDesired,
+                    tradeInfo.amountAMin,
+                    tradeInfo.amountBMin,
+                    tradeInfo.to,
+                    tradeInfo.deadline
+                );
             }
         }
     }
 
-    function _swapBNBForToken(address token, uint value, address receiver) private returns (uint) {
+    function _swapBNBForToken(address token, uint256 value, address receiver) private returns (uint256) {
         address[] memory path;
 
         if (routePairAddresses[token] != address(0)) {
@@ -160,11 +255,11 @@ contract ZapBSC is IZap, OwnableUpgradeable {
             path[1] = token;
         }
 
-        uint[] memory amounts = ROUTER.swapExactETHForTokens{value : value}(0, path, receiver, block.timestamp);
+        uint256[] memory amounts = ROUTER.swapExactETHForTokens{value : value}(0, path, receiver, block.timestamp);
         return amounts[amounts.length - 1];
     }
 
-    function _swapTokenForBNB(address token, uint amount, address receiver) private returns (uint) {
+    function _swapTokenForBNB(address token, uint256 amount, address receiver) private returns (uint256) {
         address[] memory path;
         if (routePairAddresses[token] != address(0)) {
             path = new address[](3);
@@ -177,11 +272,11 @@ contract ZapBSC is IZap, OwnableUpgradeable {
             path[1] = WBNB;
         }
 
-        uint[] memory amounts = ROUTER.swapExactTokensForETH(amount, 0, path, receiver, block.timestamp);
+        uint256[] memory amounts = ROUTER.swapExactTokensForETH(amount, 0, path, receiver, block.timestamp);
         return amounts[amounts.length - 1];
     }
 
-    function _swap(address _from, uint amount, address _to, address receiver) private returns (uint) {
+    function _swap(address _from, uint256 amount, address _to, address receiver) private returns (uint256) {
         address intermediate = routePairAddresses[_from];
         if (intermediate == address(0)) {
             intermediate = routePairAddresses[_to];
@@ -241,14 +336,14 @@ contract ZapBSC is IZap, OwnableUpgradeable {
             path[2] = _to;
         }
 
-        uint[] memory amounts = ROUTER.swapExactTokensForTokens(amount, 0, path, receiver, block.timestamp);
+        uint256[] memory amounts = ROUTER.swapExactTokensForTokens(amount, 0, path, receiver, block.timestamp);
         return amounts[amounts.length - 1];
     }
 
-    function _safeSwapToBNB(uint amount) private returns (uint) {
+    function _safeSwapToBNB(uint256 amount) private returns (uint256) {
         require(IBEP20(WBNB).balanceOf(address(this)) >= amount, "Zap: Not enough WBNB balance");
         require(safeSwapBNB != address(0), "Zap: safeSwapBNB is not set");
-        uint beforeBNB = address(this).balance;
+        uint256 beforeBNB = address(this).balance;
         ISafeSwapBNB(safeSwapBNB).withdraw(amount);
         return (address(this).balance).sub(beforeBNB);
     }
@@ -267,7 +362,7 @@ contract ZapBSC is IZap, OwnableUpgradeable {
         }
     }
 
-    function removeToken(uint i) external onlyOwner {
+    function removeToken(uint256 i) external onlyOwner {
         address token = tokens[i];
         notFlip[token] = false;
         tokens[i] = tokens[tokens.length - 1];
@@ -275,10 +370,10 @@ contract ZapBSC is IZap, OwnableUpgradeable {
     }
 
     function sweep() external onlyOwner {
-        for (uint i = 0; i < tokens.length; i++) {
+        for (uint256 i = 0; i < tokens.length; i++) {
             address token = tokens[i];
             if (token == address(0)) continue;
-            uint amount = IBEP20(token).balanceOf(address(this));
+            uint256 amount = IBEP20(token).balanceOf(address(this));
             if (amount > 0) {
                 _swapTokenForBNB(token, amount, owner());
             }
@@ -297,6 +392,6 @@ contract ZapBSC is IZap, OwnableUpgradeable {
     function setSafeSwapBNB(address _safeSwapBNB) external onlyOwner {
         require(safeSwapBNB == address(0), "Zap: safeSwapBNB already set!");
         safeSwapBNB = _safeSwapBNB;
-        IBEP20(WBNB).approve(_safeSwapBNB, uint(-1));
+        IBEP20(WBNB).approve(_safeSwapBNB, type(uint256).max);
     }
 }
