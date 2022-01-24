@@ -2,7 +2,7 @@
 pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
-import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 
 import "./token/SafeBEP20.sol";
 import "./interfaces/IPancakePair.sol";
@@ -10,7 +10,7 @@ import "./interfaces/IPancakeRouter02.sol";
 import "./interfaces/IZap.sol";
 import "./interfaces/ISafeSwapBNB.sol";
 
-contract ZapBSC is IZap, OwnableUpgradeable {
+contract ZapBSC is IZap, Ownable {
     using SafeMath for uint256;
     using SafeBEP20 for IBEP20;
 
@@ -36,12 +36,13 @@ contract ZapBSC is IZap, OwnableUpgradeable {
         uint256 deadline;
     }
 
-    address private constant WBNB = 0xae13d989daC2f0dEbFf460aC112a837C89BAa7cd; // testnet
-    address private constant CAKE = 0xf4caf41aF08E8CDB6C6Cf12EC7016B1B7A0837B0;
-    address private constant USDC = 0x962285FF57D4fe69cCC16dA9C8f968d5ffEdEDC5;
-    address private constant CHESS = 0x97b101A18ecd38B4E48f52A3264D25f9994dd604;
+    address private constant WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c; // mainnet
+    address private constant CAKE = 0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82;
+    address private constant USDT = 0x55d398326f99059fF775485246999027B3197955;
+    address private constant BUSD = 0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56;
+    address private constant USDC = 0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d;
 
-    IPancakeRouter02 private constant ROUTER = IPancakeRouter02(0xD99D1c33F9fC3444f8101754aBC46c52416550D1);
+    IPancakeRouter02 private constant ROUTER = IPancakeRouter02(0x10ED43C718714eb63d5aA57B78B54704E256024E);
 
     /* ========== STATE VARIABLES ========== */
 
@@ -50,17 +51,21 @@ contract ZapBSC is IZap, OwnableUpgradeable {
     address[] public tokens;
     address public safeSwapBNB;
 
+    event SetRoutePairAddress(address asset, address route);
+    event SetNotFlip(address token);
+    event RemoveToken(uint256 i);
+    event Sweep();
+    event Withdraw(address token);
+    event SetSafeSwapBNB(address _safeSwapBNB);
+
     /* ========== INITIALIZER ========== */
 
-    function initialize() external initializer {
-        __Ownable_init();
-        require(owner() != address(0), "Zap: owner must be set");
-
+    constructor() {
         setNotFlip(WBNB);
         setNotFlip(CAKE);
+        setNotFlip(USDT);
+        setNotFlip(BUSD);
         setNotFlip(USDC);
-        setNotFlip(CHESS);
-
     }
 
     receive() external payable {}
@@ -129,10 +134,13 @@ contract ZapBSC is IZap, OwnableUpgradeable {
 
     function batchZapInBNB(uint256[] memory _amounts, address[] memory _to) external payable {
         require(_amounts.length == _to.length, "Amounts and addresses don't match");
+        uint256 sumAmount = 0;
 
         for (uint256 i=0; i < _amounts.length; i++) {
+            sumAmount = sumAmount.add(_amounts[i]);
             _swapBNBToFlip(_to[i], _amounts[i], msg.sender);
         }
+        require(sumAmount == msg.value, "Amount unmatched");
     }
 
     function zapOut(address _from, uint256 amount) external override {
@@ -350,8 +358,9 @@ contract ZapBSC is IZap, OwnableUpgradeable {
 
     /* ========== RESTRICTED FUNCTIONS ========== */
 
-    function setRoutePairAddress(address asset, address route) public onlyOwner {
+    function setRoutePairAddress(address asset, address route) external onlyOwner {
         routePairAddresses[asset] = route;
+        emit SetRoutePairAddress(asset, route);
     }
 
     function setNotFlip(address token) public onlyOwner {
@@ -360,6 +369,7 @@ contract ZapBSC is IZap, OwnableUpgradeable {
         if (needPush) {
             tokens.push(token);
         }
+        emit SetNotFlip(token);
     }
 
     function removeToken(uint256 i) external onlyOwner {
@@ -367,6 +377,7 @@ contract ZapBSC is IZap, OwnableUpgradeable {
         notFlip[token] = false;
         tokens[i] = tokens[tokens.length - 1];
         tokens.pop();
+        emit RemoveToken(i);
     }
 
     function sweep() external onlyOwner {
@@ -378,6 +389,7 @@ contract ZapBSC is IZap, OwnableUpgradeable {
                 _swapTokenForBNB(token, amount, owner());
             }
         }
+        emit Sweep();
     }
 
     function withdraw(address token) external onlyOwner {
@@ -387,11 +399,13 @@ contract ZapBSC is IZap, OwnableUpgradeable {
         }
 
         IBEP20(token).transfer(owner(), IBEP20(token).balanceOf(address(this)));
+        emit Withdraw(token);
     }
 
     function setSafeSwapBNB(address _safeSwapBNB) external onlyOwner {
         require(safeSwapBNB == address(0), "Zap: safeSwapBNB already set!");
         safeSwapBNB = _safeSwapBNB;
         IBEP20(WBNB).approve(_safeSwapBNB, type(uint256).max);
+        emit SetSafeSwapBNB(_safeSwapBNB);
     }
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
@@ -16,6 +17,10 @@ contract Broker {
     event Deposit(address indexed sender, uint amount, uint balance);
     event Withdraw(address indexed user, uint256 indexed pid, uint256 amount);
 
+    event ZapInTokenAndDeposit(address _from, uint256[] _pid, uint256[] _amounts);
+    event ZapInBNBAndDeposit(uint256[] _pid, uint256[] _amounts);
+    event WithdrawAndZapOut(address _to, uint256[] _pid, uint256[] _amounts);
+
     IZap public zap;
     ISimplichef public simplichef;
 
@@ -30,20 +35,14 @@ contract Broker {
         emit Deposit(msg.sender, msg.value, address(this).balance);
     }
 
-    function _approveTokenForZap(address token) private {
-        if (IBEP20(token).allowance(address(this), address(zap)) == 0) {
+    function _approveTokenForZap(address token, uint256 wantAmt) private {
+        if (IBEP20(token).allowance(address(this), address(zap)) < wantAmt) {
             IBEP20(token).safeApprove(address(zap), type(uint256).max);
         }
     }
 
-    function _approveTokenForSimpliChef(address token) private {
-        if (IBEP20(token).allowance(address(this), address(simplichef)) == 0) {
-            IBEP20(token).safeApprove(address(simplichef), type(uint256).max);
-        }
-    }
-
-    function _approveTokenForBroker(address token) private {
-        if (IBEP20(token).allowance(address(this), address(simplichef)) == 0) {
+    function _approveTokenForSimpliChef(address token, uint256 wantAmt) private {
+        if (IBEP20(token).allowance(address(this), address(simplichef)) < wantAmt) {
             IBEP20(token).safeApprove(address(simplichef), type(uint256).max);
         }
     }
@@ -52,39 +51,41 @@ contract Broker {
     // zapAndDeposit
     function zapInTokenAndDeposit(
         address _from,
-        uint256[] memory _amounts,
-        address[] memory _to,
         uint256[] memory _pid,
-        address _beneficiary
+        uint256[] memory _amounts
     ) external {
-        require(_amounts.length == _to.length, "Amount and address lengths don't match");
-        require(_to.length == _pid.length, "Address and pid lengths don't match");
-        _approveTokenForZap(_from);
+        require(_amounts.length == _pid.length, "Amount and pid lengths don't match");
         uint256 sumAmount = 0;
         for (uint256 i=0; i < _amounts.length; i++){
             sumAmount = sumAmount.add(_amounts[i]);
         }
+        _approveTokenForZap(_from, sumAmount);
         IBEP20(_from).safeTransferFrom(msg.sender, address(this), sumAmount);
         for (uint256 i=0; i < _amounts.length; i++) {
-            (, , uint256 LPAmount) = zap.zapInToken(_from, _amounts[i], _to[i]);
-            _approveTokenForSimpliChef(_to[i]);
-            simplichef.depositOnlyBroker(_pid[i], LPAmount, _beneficiary);
+            address _to = simplichef.poolAddress(_pid[i]);
+            (, , uint256 LPAmount) = zap.zapInToken(_from, _amounts[i], _to);
+            _approveTokenForSimpliChef(_to, LPAmount);
+            simplichef.depositOnlyBroker(_pid[i], LPAmount, msg.sender);
         }
+        emit ZapInTokenAndDeposit(_from, _pid, _amounts);
     }
 
     function zapInBNBAndDeposit(
-        uint256[] memory _amounts,
-        address[] memory _to,
         uint256[] memory _pid,
-        address _beneficiary
+        uint256[] memory _amounts
     ) external payable {
-        require(_amounts.length == _to.length, "Amount and address lengths don't match");
-        require(_to.length == _pid.length, "Address and pid lengths don't match");
+        require(_amounts.length == _pid.length, "Amount and pid lengths don't match");
+        uint256 sumAmount = 0;
+
         for (uint256 i=0; i < _amounts.length; i++) {
-            (, , uint256 LPAmount) = zap.zapIn{value : _amounts[i]}(_to[i]);
-            _approveTokenForSimpliChef(_to[i]);
-            simplichef.depositOnlyBroker(_pid[i], LPAmount, _beneficiary);
+            address _to = simplichef.poolAddress(_pid[i]);
+            sumAmount = sumAmount.add(_amounts[i]);
+            (, , uint256 LPAmount) = zap.zapIn{value : _amounts[i]}(_to);
+            _approveTokenForSimpliChef(_to, LPAmount);
+            simplichef.depositOnlyBroker(_pid[i], LPAmount, msg.sender);
         }
+        require(sumAmount == msg.value, "Amount unmatched");
+        emit ZapInBNBAndDeposit(_pid, _amounts);
     }
 
     function withdrawAndZapOut(
@@ -97,7 +98,7 @@ contract Broker {
         for (uint256 i=0; i < _amounts.length; i++) {
             uint256 LPAmount = simplichef.withdrawOnlyBroker(_pid[i], _amounts[i], msg.sender);
             address from = simplichef.poolAddress(_pid[i]);
-            _approveTokenForZap(from);
+            _approveTokenForZap(from, LPAmount);
             totalAmount = totalAmount.add(zap.zapOutToToken(from, LPAmount, _to));
         }
         if (_to == WBNB) {
@@ -107,5 +108,6 @@ contract Broker {
         } else {
             IBEP20(_to).safeTransfer(msg.sender, totalAmount);
         }
+        emit WithdrawAndZapOut(_to, _pid, _amounts);
     }
 }

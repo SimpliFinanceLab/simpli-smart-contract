@@ -1,5 +1,5 @@
 /**
- *Submitted for verification at BscScan.com on 2021-04-26
+ *Submitted for verification at BscScan.com on 2021-04-05
 */
 
 // SPDX-License-Identifier: MIT
@@ -1715,7 +1715,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
 
     bool public isCAKEStaking; // only for staking CAKE using pancakeswap's native CAKE staking contract.
     bool public isSameAssetDeposit;
-    bool public isAutoComp; // this vault is purely for staking. eg. WBNB-AUTO staking vault.
+    bool public isAutoComp; // this vault is purely for staking. eg. WBNB-SIMPLI staking vault.
 
     address public farmContractAddress; // address of farm, eg, PCS, Thugs etc.
     uint256 public pid; // pid of pool in farmContractAddress
@@ -1726,8 +1726,14 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
     address public uniRouterAddress; // uniswap, pancakeswap etc
 
     address public wbnbAddress;
-    address public autoFarmAddress;
-    address public AUTOAddress;
+    address public simpliFarmAddress;
+    address public SIMPLIAddress;
+
+    address public simpliStakingAddress; // SimpliStaking Contract Address
+    uint256 public stakingFee = 0; // 70;
+    uint256 public constant stakingFeeMax = 10000; // 100 = 1%
+    uint256 public constant stakingFeeUL = 300;
+
     address public govAddress; // timelock contract
     bool public onlyGov = true;
 
@@ -1756,7 +1762,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
     uint256 public slippageFactor = 950; // 5% default slippage tolerance
     uint256 public constant slippageFactorUL = 995;
 
-    address[] public earnedToAUTOPath;
+    address[] public earnedToSIMPLIPath;
     address[] public earnedToToken0Path;
     address[] public earnedToToken1Path;
     address[] public token0ToEarnedPath;
@@ -1767,7 +1773,8 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         uint256 _withdrawFeeFactor,
         uint256 _controllerFee,
         uint256 _buyBackRate,
-        uint256 _slippageFactor
+        uint256 _slippageFactor,
+        uint256 _stakingFeeFactor
     );
 
     event SetGov(address _govAddress);
@@ -1775,6 +1782,9 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
     event SetUniRouterAddress(address _uniRouterAddress);
     event SetBuyBackAddress(address _buyBackAddress);
     event SetRewardsAddress(address _rewardsAddress);
+    event SetSimpliStakingAddress(address _simpliStakingAddress);
+    event InCaseTokensGetStuck(address _token, uint256 _amount, address _to);
+    event WrapBNB();
 
     modifier onlyAllowGov() {
         require(msg.sender == govAddress, "!gov");
@@ -1783,7 +1793,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
 
     // Receives new deposits from user
     function deposit(address _userAddress, uint256 _wantAmt)
-        public
+        external
         virtual
         onlyOwner
         nonReentrant
@@ -1805,6 +1815,11 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
                 .mul(entranceFeeFactor)
                 .div(wantLockedTotal)
                 .div(entranceFeeFactorMax);
+        } else if (wantLockedTotal == 0 && sharesTotal == 0){
+            // init case: calculate the entraceFeeFactor
+            sharesAdded = _wantAmt
+                .mul(entranceFeeFactor)
+                .div(entranceFeeFactorMax);
         }
         sharesTotal = sharesTotal.add(sharesAdded);
 
@@ -1817,7 +1832,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         return sharesAdded;
     }
 
-    function farm() public virtual nonReentrant {
+    function farm() external virtual nonReentrant {
         _farm();
     }
 
@@ -1878,7 +1893,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
 
         wantLockedTotal = wantLockedTotal.sub(_wantAmt);
 
-        IERC20(wantAddress).safeTransfer(autoFarmAddress, _wantAmt);
+        IERC20(wantAddress).safeTransfer(simpliFarmAddress, _wantAmt);
 
         return sharesRemoved;
     }
@@ -1887,7 +1902,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
     // 2. Converts farm tokens into want tokens
     // 3. Deposits want tokens
 
-    function earn() public virtual nonReentrant whenNotPaused {
+    function earn() external virtual nonReentrant whenNotPaused {
         require(isAutoComp, "!isAutoComp");
         if (onlyGov) {
             require(msg.sender == govAddress, "!gov");
@@ -1903,8 +1918,28 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         // Converts farm tokens into want tokens
         uint256 earnedAmt = IERC20(earnedAddress).balanceOf(address(this));
 
-        earnedAmt = distributeFees(earnedAmt);
-        earnedAmt = buyBack(earnedAmt);
+        //earnedAmt = distributeFees(earnedAmt);
+        //earnedAmt = buyBack(earnedAmt);
+        earnedAmt = distributeFees(
+            earnedAmt,
+            simpliStakingAddress,
+            stakingFee,
+            stakingFeeMax
+        );
+
+        earnedAmt = distributeFees(
+            earnedAmt,
+            rewardsAddress,
+            controllerFee,
+            controllerFeeMax
+        );
+
+        earnedAmt = distributeFees(
+            earnedAmt,
+            buyBackAddress,
+            buyBackRate,
+            buyBackRateMax
+        );
 
         if (isCAKEStaking || isSameAssetDeposit) {
             lastEarnBlock = block.number;
@@ -1978,7 +2013,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
 
         uint256 buyBackAmt = _earnedAmt.mul(buyBackRate).div(buyBackRateMax);
 
-        if (earnedAddress == AUTOAddress) {
+        if (earnedAddress == SIMPLIAddress) {
             IERC20(earnedAddress).safeTransfer(buyBackAddress, buyBackAmt);
         } else {
             IERC20(earnedAddress).safeIncreaseAllowance(
@@ -1990,7 +2025,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
                 uniRouterAddress,
                 buyBackAmt,
                 slippageFactor,
-                earnedToAUTOPath,
+                earnedToSIMPLIPath,
                 buyBackAddress,
                 block.timestamp.add(600)
             );
@@ -1999,25 +2034,42 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         return _earnedAmt.sub(buyBackAmt);
     }
 
-    function distributeFees(uint256 _earnedAmt)
+    function distributeFees(uint256 _earnedAmt, address _to, uint256 _fee, uint256 _feeMax)
         internal
         virtual
         returns (uint256)
     {
+        if (_fee <= 0) {
+            return _earnedAmt;
+        }
+
+        uint256 fee = _earnedAmt.mul(_fee).div(_feeMax);
+
         if (_earnedAmt > 0) {
-            // Performance fee
-            if (controllerFee > 0) {
-                uint256 fee =
-                    _earnedAmt.mul(controllerFee).div(controllerFeeMax);
-                IERC20(earnedAddress).safeTransfer(rewardsAddress, fee);
-                _earnedAmt = _earnedAmt.sub(fee);
+            if (_fee > 0) {
+                if (earnedAddress == SIMPLIAddress) {
+                    IERC20(earnedAddress).safeTransfer(_to, fee);
+                } else {
+                    IERC20(earnedAddress).safeIncreaseAllowance(
+                        uniRouterAddress,
+                        fee
+                    );
+                    _safeSwap(
+                        uniRouterAddress,
+                        fee,
+                        slippageFactor,
+                        earnedToSIMPLIPath,
+                        _to,
+                        block.timestamp.add(600)
+                    );
+                }
             }
         }
 
-        return _earnedAmt;
+        return _earnedAmt.sub(fee);
     }
 
-    function convertDustToEarned() public virtual whenNotPaused {
+    function convertDustToEarned() external virtual whenNotPaused {
         require(isAutoComp, "!isAutoComp");
         require(!isCAKEStaking, "isCAKEStaking");
 
@@ -2062,11 +2114,11 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         }
     }
 
-    function pause() public virtual onlyAllowGov {
+    function pause() external virtual onlyAllowGov {
         _pause();
     }
 
-    function unpause() public virtual onlyAllowGov {
+    function unpause() external virtual onlyAllowGov {
         _unpause();
     }
 
@@ -2075,8 +2127,9 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         uint256 _withdrawFeeFactor,
         uint256 _controllerFee,
         uint256 _buyBackRate,
-        uint256 _slippageFactor
-    ) public virtual onlyAllowGov {
+        uint256 _slippageFactor,
+        uint256 _stakingFeeFactor
+    ) external virtual onlyAllowGov {
         require(
             _entranceFeeFactor >= entranceFeeFactorLL,
             "_entranceFeeFactor too low"
@@ -2095,6 +2148,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
             _withdrawFeeFactor <= withdrawFeeFactorMax,
             "_withdrawFeeFactor too high"
         );
+
         withdrawFeeFactor = _withdrawFeeFactor;
 
         require(_controllerFee <= controllerFeeUL, "_controllerFee too high");
@@ -2109,27 +2163,31 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         );
         slippageFactor = _slippageFactor;
 
+        require(_stakingFeeFactor <= stakingFeeUL, "_stakingFeeFactor too high");
+        stakingFee = _stakingFeeFactor;
+
         emit SetSettings(
             _entranceFeeFactor,
             _withdrawFeeFactor,
             _controllerFee,
             _buyBackRate,
-            _slippageFactor
+            _slippageFactor,
+            _stakingFeeFactor
         );
     }
 
-    function setGov(address _govAddress) public virtual onlyAllowGov {
+    function setGov(address _govAddress) external virtual onlyAllowGov {
         govAddress = _govAddress;
         emit SetGov(_govAddress);
     }
 
-    function setOnlyGov(bool _onlyGov) public virtual onlyAllowGov {
+    function setOnlyGov(bool _onlyGov) external virtual onlyAllowGov {
         onlyGov = _onlyGov;
         emit SetOnlyGov(_onlyGov);
     }
 
     function setUniRouterAddress(address _uniRouterAddress)
-        public
+        external
         virtual
         onlyAllowGov
     {
@@ -2138,7 +2196,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
     }
 
     function setBuyBackAddress(address _buyBackAddress)
-        public
+        external
         virtual
         onlyAllowGov
     {
@@ -2147,7 +2205,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
     }
 
     function setRewardsAddress(address _rewardsAddress)
-        public
+        external
         virtual
         onlyAllowGov
     {
@@ -2155,14 +2213,24 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         emit SetRewardsAddress(_rewardsAddress);
     }
 
+    function setSimpliStakingAddress(address _simpliStakingAddress)
+        external
+        virtual
+        onlyAllowGov
+    {
+        simpliStakingAddress = _simpliStakingAddress;
+        emit SetSimpliStakingAddress(_simpliStakingAddress);
+    }
+
     function inCaseTokensGetStuck(
         address _token,
         uint256 _amount,
         address _to
-    ) public virtual onlyAllowGov {
+    ) external virtual onlyAllowGov {
         require(_token != earnedAddress, "!safe");
         require(_token != wantAddress, "!safe");
         IERC20(_token).safeTransfer(_to, _amount);
+        emit InCaseTokensGetStuck(_token, _amount, _to);
     }
 
     function _wrapBNB() internal virtual {
@@ -2173,8 +2241,9 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         }
     }
 
-    function wrapBNB() public virtual onlyAllowGov {
+    function wrapBNB() external virtual onlyAllowGov {
         _wrapBNB();
+        emit WrapBNB();
     }
 
     function _safeSwap(
@@ -2203,12 +2272,12 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         return members[_member];
     }
 
-    function addMember(address _member) public onlyAllowGov {
+    function addMember(address _member) external onlyAllowGov {
         require(!isMember(_member), "Address is member already.");
         members[_member] = true;
     }
 
-    function removeMember(address _member) public onlyAllowGov {
+    function removeMember(address _member) external onlyAllowGov {
         require(isMember(_member), "Not member of whitelist.");
         delete members[_member];
     }
@@ -2221,7 +2290,7 @@ contract StratX2_PCS is StratX2 {
         bool _isCAKEStaking,
         bool _isSameAssetDeposit,
         bool _isAutoComp,
-        address[] memory _earnedToAUTOPath,
+        address[] memory _earnedToSIMPLIPath,
         address[] memory _earnedToToken0Path,
         address[] memory _earnedToToken1Path,
         address[] memory _token0ToEarnedPath,
@@ -2229,12 +2298,13 @@ contract StratX2_PCS is StratX2 {
         uint256 _controllerFee,
         uint256 _buyBackRate,
         uint256 _entranceFeeFactor,
-        uint256 _withdrawFeeFactor
+        uint256 _withdrawFeeFactor,
+        uint256 _stakingFee
     ) public {
         wbnbAddress = _addresses[0];
         govAddress = _addresses[1];
-        autoFarmAddress = _addresses[2];
-        AUTOAddress = _addresses[3];
+        simpliFarmAddress = _addresses[2];
+        SIMPLIAddress = _addresses[3];
 
         wantAddress = _addresses[4];
         token0Address = _addresses[5];
@@ -2248,7 +2318,7 @@ contract StratX2_PCS is StratX2 {
         isAutoComp = _isAutoComp;
 
         uniRouterAddress = _addresses[9];
-        earnedToAUTOPath = _earnedToAUTOPath;
+        earnedToSIMPLIPath = _earnedToSIMPLIPath;
         earnedToToken0Path = _earnedToToken0Path;
         earnedToToken1Path = _earnedToToken1Path;
         token0ToEarnedPath = _token0ToEarnedPath;
@@ -2256,11 +2326,16 @@ contract StratX2_PCS is StratX2 {
 
         controllerFee = _controllerFee;
         rewardsAddress = _addresses[10];
+
         buyBackRate = _buyBackRate;
         buyBackAddress = _addresses[11];
+
         entranceFeeFactor = _entranceFeeFactor;
         withdrawFeeFactor = _withdrawFeeFactor;
 
-        transferOwnership(autoFarmAddress);
+        stakingFee = _stakingFee;
+        simpliStakingAddress = _addresses[12];
+
+        transferOwnership(simpliFarmAddress);
     }
 }

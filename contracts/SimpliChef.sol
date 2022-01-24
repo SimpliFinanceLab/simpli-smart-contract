@@ -1461,6 +1461,7 @@ contract SimpliChef is Ownable, ReentrancyGuard {
     uint256 public totalAllocPoint = 0; // Total allocation points. Must be the sum of all allocation points in all pools.
 
     address public broker;
+    mapping(address => bool) private usedStrategy;
 
     event Deposit(address indexed user, uint256 indexed pid, uint256 amount);
     event Withdraw(address indexed user, uint256 indexed pid, uint256 amount);
@@ -1469,6 +1470,10 @@ contract SimpliChef is Ownable, ReentrancyGuard {
         uint256 indexed pid,
         uint256 amount
     );
+    event SetBroker(address _broker);
+    event Add(uint256 _allocPoint, IERC20 _want, address _strat);
+    event Set(uint256 _pid, uint256 _allocPoint);
+    event InCaseTokensGetStuck(address _token, uint256 _amount);
 
     constructor(
         address simpli_,
@@ -1489,8 +1494,9 @@ contract SimpliChef is Ownable, ReentrancyGuard {
         _;
     }
 
-    function setBroker(address _broker) public onlyOwner {
+    function setBroker(address _broker) external onlyOwner {
         broker = _broker;
+        emit SetBroker(_broker);
     }
 
     function poolAddress(uint256 pid) external view returns (address) {
@@ -1508,12 +1514,10 @@ contract SimpliChef is Ownable, ReentrancyGuard {
     function add(
         uint256 _allocPoint,
         IERC20 _want,
-        bool _withUpdate,
         address _strat
-    ) public onlyOwner {
-        if (_withUpdate) {
-            massUpdatePools();
-        }
+    ) external onlyOwner {
+        require(!usedStrategy[_strat], '_strat is already used');
+        massUpdatePools();
         uint256 lastRewardBlock =
             block.number > startBlock ? block.number : startBlock;
         totalAllocPoint = totalAllocPoint.add(_allocPoint);
@@ -1526,21 +1530,21 @@ contract SimpliChef is Ownable, ReentrancyGuard {
                 strat: _strat
             })
         );
+        usedStrategy[_strat] == true;
+        emit Add(_allocPoint, _want, _strat);
     }
 
     // Update the given pool's SIMPLI allocation point. Can only be called by the owner.
     function set(
         uint256 _pid,
-        uint256 _allocPoint,
-        bool _withUpdate
-    ) public onlyOwner {
-        if (_withUpdate) {
-            massUpdatePools();
-        }
+        uint256 _allocPoint
+    ) external onlyOwner {
+        massUpdatePools();
         totalAllocPoint = totalAllocPoint.sub(poolInfo[_pid].allocPoint).add(
             _allocPoint
         );
         poolInfo[_pid].allocPoint = _allocPoint;
+        emit Set(_pid, _allocPoint);
     }
 
     // Return reward multiplier over the given _from to _to block.
@@ -1601,7 +1605,9 @@ contract SimpliChef is Ownable, ReentrancyGuard {
     function massUpdatePools() public {
         uint256 length = poolInfo.length;
         for (uint256 pid = 0; pid < length; ++pid) {
-            updatePool(pid);
+            if (poolInfo[pid].allocPoint > 0) {
+                updatePool(pid);
+            }
         }
     }
 
@@ -1624,7 +1630,7 @@ contract SimpliChef is Ownable, ReentrancyGuard {
             multiplier.mul(SIMPLIPerBlock).mul(pool.allocPoint).div(
                 totalAllocPoint
             );
-
+        SIMPLIReward = (SIMPLIReward + IERC20(SIMPLI).totalSupply()) > SIMPLIMaxSupply ? (SIMPLIMaxSupply - IERC20(SIMPLI).totalSupply()) : SIMPLIReward;
         SIMPLIToken(SIMPLI).mint(
             owner(),
             SIMPLIReward.mul(ownerSIMPLIReward).div(1000)
@@ -1638,7 +1644,7 @@ contract SimpliChef is Ownable, ReentrancyGuard {
     }
 
     // Want tokens moved from user -> SIMPLIFarm (SIMPLI allocation) -> Strat (compounding)
-    function deposit(uint256 _pid, uint256 _wantAmt) public nonReentrant {
+    function deposit(uint256 _pid, uint256 _wantAmt) external nonReentrant {
         updatePool(_pid);
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][msg.sender];
@@ -1669,7 +1675,7 @@ contract SimpliChef is Ownable, ReentrancyGuard {
     }
 
     // Want tokens moved from user -> SIMPLIFarm (SIMPLI allocation) -> Strat (compounding)
-    function depositOnlyBroker(uint256 _pid, uint256 _wantAmt, address _beneficiary) public nonReentrant onlyBroker {
+    function depositOnlyBroker(uint256 _pid, uint256 _wantAmt, address _beneficiary) external nonReentrant onlyBroker {
         updatePool(_pid);
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][_beneficiary];
@@ -1796,12 +1802,12 @@ contract SimpliChef is Ownable, ReentrancyGuard {
         return _wantAmt;
     }
 
-    function withdrawAll(uint256 _pid) public nonReentrant {
+    function withdrawAll(uint256 _pid) external nonReentrant {
         withdraw(_pid, type(uint256).max);
     }
 
     // Withdraw without caring about rewards. EMERGENCY ONLY.
-    function emergencyWithdraw(uint256 _pid, address _beneficiary) public nonReentrant onlyBroker {
+    function emergencyWithdraw(uint256 _pid, address _beneficiary) external nonReentrant onlyBroker {
         PoolInfo storage pool = poolInfo[_pid];
         UserInfo storage user = userInfo[_pid][_beneficiary];
 
@@ -1829,10 +1835,11 @@ contract SimpliChef is Ownable, ReentrancyGuard {
     }
 
     function inCaseTokensGetStuck(address _token, uint256 _amount)
-        public
+        external
         onlyOwner
     {
         require(_token != SIMPLI, "!safe");
         IERC20(_token).safeTransfer(msg.sender, _amount);
+        emit InCaseTokensGetStuck(_token, _amount);
     }
 }
