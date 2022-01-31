@@ -1786,6 +1786,9 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
     event InCaseTokensGetStuck(address _token, uint256 _amount, address _to);
     event WrapBNB();
 
+    event AddMember(address _member);
+    event RemoveMember(address _member);
+
     modifier onlyAllowGov() {
         require(msg.sender == govAddress, "!gov");
         _;
@@ -2275,11 +2278,13 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
     function addMember(address _member) external onlyAllowGov {
         require(!isMember(_member), "Address is member already.");
         members[_member] = true;
+        emit AddMember(_member);
     }
 
     function removeMember(address _member) external onlyAllowGov {
         require(isMember(_member), "Not member of whitelist.");
         delete members[_member];
+        emit RemoveMember(_member);
     }
 }
 
