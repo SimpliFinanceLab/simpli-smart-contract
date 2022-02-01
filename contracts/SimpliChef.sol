@@ -1530,7 +1530,7 @@ contract SimpliChef is Ownable, ReentrancyGuard {
                 strat: _strat
             })
         );
-        usedStrategy[_strat] == true;
+        usedStrategy[_strat] = true;
         emit Add(_allocPoint, _want, _strat);
     }
 
