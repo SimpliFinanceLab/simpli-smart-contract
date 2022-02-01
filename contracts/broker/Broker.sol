@@ -46,7 +46,7 @@ contract Broker {
     function _approveTokenForSimpliChef(address token, uint256 wantAmt) private {
         uint256 curAllowance = IBEP20(token).allowance(address(this), address(simplichef));
         if (curAllowance < wantAmt) {
-                IBEP20(token).safeIncreaseAllowance(address(zap), wantAmt.sub(curAllowance));
+                IBEP20(token).safeIncreaseAllowance(address(simplichef), wantAmt.sub(curAllowance));
         }
     }
 
